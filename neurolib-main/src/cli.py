@@ -1,10 +1,12 @@
 import argparse
 import json
+import os
 import yaml
 from pathlib import Path
 
 from .adapters.pse_adapter import adapt_pse_experiment
 from .data_manager import DataManager           # Module to resolve data folder paths
+from .finalspark.client import prepare_pse_from_finalspark
 
 # Pulled from docs
 class CaseInsensitiveChoicesAction(argparse.Action):
@@ -28,8 +30,11 @@ def main():
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["adapt-pse"],
-        help="Optional command. Use 'adapt-pse' to prepare PSE pipeline inputs."
+        choices=["adapt-pse", "finalspark-fetch-pse"],
+        help=(
+            "Optional command. Use 'adapt-pse' to prepare PSE inputs from a local export "
+            "or 'finalspark-fetch-pse' to fetch read-only NeuroPlatform data and prepare PSE inputs."
+        )
     )
     parser.add_argument(
         "--iteration",
@@ -65,21 +70,50 @@ def main():
     )
     parser.add_argument(
         "--metadata",
-        help="For adapt-pse: path to experiment metadata JSON"
+        help="For adapter commands: path to experiment metadata JSON"
     )
     parser.add_argument(
         "--output-root",
         default="data",
-        help="For adapt-pse: output data root directory"
+        help="For adapter commands: output data root directory"
     )
     parser.add_argument(
         "--column-map",
         help="For adapt-pse: JSON object or JSON file mapping input columns to Time/channel/Amplitude"
     )
+    parser.add_argument(
+        "--start",
+        help="For finalspark-fetch-pse: UTC query start time (ISO-8601 recommended)"
+    )
+    parser.add_argument(
+        "--stop",
+        help="For finalspark-fetch-pse: UTC query stop time (ISO-8601 recommended)"
+    )
+    parser.add_argument(
+        "--fs-name",
+        help="For finalspark-fetch-pse: FinalSpark experiment/MEA ID such as fs300"
+    )
+    parser.add_argument(
+        "--token-env",
+        default="FINALSPARK_TOKEN",
+        help=(
+            "For finalspark-fetch-pse: environment variable containing the FinalSpark experiment token. "
+            "Used only when --fs-name is not supplied. Default: FINALSPARK_TOKEN"
+        )
+    )
+    parser.add_argument(
+        "--no-trigger-timestamps",
+        action="store_true",
+        help="For finalspark-fetch-pse: do not populate empty stim_pulse_timestamps from trigger logs"
+    )
     args = parser.parse_args()
 
     if getattr(args, "command", None) == "adapt-pse":
         _run_pse_adapter(args, parser)
+        return
+
+    if getattr(args, "command", None) == "finalspark-fetch-pse":
+        _run_finalspark_fetch_pse(args, parser)
         return
 
     _validate_required(parser, args, ["iteration", "protocol", "date", "round"])
@@ -164,6 +198,37 @@ def _run_pse_adapter(args, parser) -> None:
     )
 
     print(f"Wrote PSE spikes: {paths['spike_path']}")
+    print(f"Wrote PSE metadata: {paths['experiment_params_path']}")
+
+
+def _run_finalspark_fetch_pse(args, parser) -> None:
+    _validate_required(parser, args, ["metadata", "iteration", "date", "round", "start", "stop"])
+
+    token = os.getenv(args.token_env) if args.token_env else None
+    if not args.fs_name and not token:
+        parser.error(
+            "finalspark-fetch-pse requires --fs-name or a FinalSpark token in "
+            f"the {args.token_env!r} environment variable"
+        )
+
+    paths = prepare_pse_from_finalspark(
+        metadata=args.metadata,
+        output_root=args.output_root,
+        iteration=args.iteration,
+        date=args.date,
+        round_=args.round,
+        start=args.start,
+        stop=args.stop,
+        fs_name=args.fs_name,
+        token=token,
+        include_trigger_timestamps=not args.no_trigger_timestamps,
+    )
+
+    print(f"FinalSpark fs name: {paths['finalspark_fs_name']}")
+    print(f"Fetched spike events: {paths['spike_records']}")
+    print(f"Fetched trigger records: {paths['trigger_records']}")
+    print(f"Wrote PSE spikes: {paths['spike_path']}")
+    print(f"Wrote FinalSpark triggers: {paths['trigger_path']}")
     print(f"Wrote PSE metadata: {paths['experiment_params_path']}")
 
 

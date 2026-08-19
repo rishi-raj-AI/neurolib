@@ -1,3 +1,5 @@
+import importlib
+
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
@@ -9,7 +11,29 @@ SAMPLE_BINS = 500
 # Default number of PCA components to use before UMAP
 DEFAULT_PCA_COMPONENTS = 12
 
-def compute_umap_embedding(df: pd.DataFrame, n_components: int = 3, 
+
+class _LazyUMAPModule:
+    """Load umap.umap_ only when UMAP functionality is first accessed."""
+
+    def __init__(self):
+        self._module = None
+
+    def _load(self):
+        if self._module is None:
+            self._module = importlib.import_module("umap.umap_")
+        return self._module
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+
+# Keep a module-level object so existing tests and callers can patch
+# src.analysis.umap_embed.umap.UMAP while still avoiding the heavy UMAP
+# import during normal module import.
+umap = _LazyUMAPModule()
+
+
+def compute_umap_embedding(df: pd.DataFrame, n_components: int = 3,
                           bin_size_ms: int = 10, random_state: int = 42, sample_mode: bool = False) -> dict:
     """
     Compute UMAP embedding combined with PCA and low-memory configurations
@@ -64,7 +88,7 @@ def compute_umap_embedding(df: pd.DataFrame, n_components: int = 3,
     neural_activity = pd.DataFrame(index=range(num_bins), columns=channels)
 
     for channel in channels:
-        times_ms = (data.loc[data['channel']==channel,'Time'] - start_time).dt.total_seconds() * 1000
+        times_ms = (data.loc[data['channel'] == channel, 'Time'] - start_time).dt.total_seconds() * 1000
 
         counts, _ = np.histogram(times_ms, bins=bin_edges)
 
@@ -83,17 +107,16 @@ def compute_umap_embedding(df: pd.DataFrame, n_components: int = 3,
     neural_activity_scaled = StandardScaler().fit_transform(neural_activity_array)
 
     try:
-        # Apply PCA <-- NEeded for Low memory Usage
+        # Apply PCA <-- Needed for low memory usage
         pca_n_components = min(DEFAULT_PCA_COMPONENTS, neural_activity_scaled.shape[1])
         pca = PCA(n_components=pca_n_components, svd_solver='randomized', random_state=random_state)
         X_reduced = pca.fit_transform(neural_activity_scaled)
 
-        # Cfg UMAP for low memory usage.
-        import umap.umap_ as umap
-
+        # Configure UMAP for low memory usage. The module is loaded lazily
+        # when UMAP is accessed for the first time.
         model = umap.UMAP(
-            n_components=n_components, 
-            random_state=random_state, 
+            n_components=n_components,
+            random_state=random_state,
             n_epochs=50,
             metric='euclidean',
             low_memory=True

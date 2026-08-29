@@ -1,43 +1,48 @@
-# FinalSpark NeuroPlatform v2 Read-Only Integration
+# FinalSpark Shared NeuroPlatform Read-Only Integration
 
 ## Purpose
 
-This integration connects the neuronal analysis project to FinalSpark's documented `neuroplatformv2` Python SDK without requiring manual export through the web interface.
+This integration connects the neuronal analysis project to the actual shared FinalSpark notebook environment available at `np7.finalspark.com/notebooks`.
 
-The current implementation is deliberately **read-only**. It retrieves spike events and trigger logs and passes them into the existing PSE adapter. No stimulation or hardware-changing calls are made.
+Runtime discovery on the authorised notebook showed:
 
-## Requirements
+- Python 3.11.10
+- module: `neuroplatform`
+- module location: `/data/workspace_files/neuroplatform.py`
+- `Database()` constructor
+- `Experiment(token)` constructor
+- no `neuroplatformv2` package in the shared environment
 
-According to the FinalSpark NeuroPlatform v2 documentation:
+The integration is deliberately **read-only**. It uses only database retrieval methods and does not call stimulation, trigger-control, Intan-control, or experiment start/stop methods.
 
-- Python `>=3.11,<3.13`
-- network access to FinalSpark laboratory services
-- valid FinalSpark connection settings/authorization
-- the `neuroplatformv2` SDK installed from an authorised/local SDK clone
+## Verified shared API contract
 
-Install the SDK from its clone with:
+The notebook environment exposes these relevant methods:
 
-```bash
-python -m pip install -e .
+```python
+from neuroplatform import Database
+
+db = Database()
+spikes = db.get_spike_event(start, stop, fsname)
+triggers = db.get_all_triggers(start, stop)
 ```
 
-The SDK requires environment configuration **before import**. FinalSpark documents these required values:
+Verified signatures:
 
-```bash
-export DB_PORT=8086
-export INTAN_SOFTWARE_IP="..."
-export TRIGGER_IP="..."
+```text
+Database.get_spike_event(self, start: datetime, stop: datetime, fsname: str) -> DataFrame
+Database.get_all_triggers(self, start: datetime, stop: datetime) -> DataFrame
 ```
 
-Additional deployment-specific settings such as `DB_IP` may also be supplied by FinalSpark/operator access.
+Other read methods visible in the shared wrapper include spike counts, raw spikes, impedance and environmental measurements, but they are outside the first PSE integration milestone.
 
 ## Architecture
 
 ```text
-FinalSpark NeuroPlatform v2
+FinalSpark shared notebook (np7)
         |
-        | DatabaseController.get_spike_event(SpikeEventQuery(...))
-        | DatabaseController.get_all_triggers(TriggersQuery(...))
+        | neuroplatform.Database.get_spike_event(start, stop, fsname)
+        | neuroplatform.Database.get_all_triggers(start, stop)
         v
 src/finalspark/client.py
         |
@@ -56,26 +61,7 @@ data/{iteration}/PSE/{date}/{round}/
 PSEProtocol
 ```
 
-## FinalSpark v2 API contract
-
-The integration follows the official v2 controller/schema pattern:
-
-```python
-from neuroplatformv2.core.database import DatabaseController
-from neuroplatformv2.utils.schemas import SpikeEventQuery, TriggersQuery
-
-spikes = await DatabaseController.get_spike_event(
-    SpikeEventQuery(start=start, stop=stop, fsname="fs511")
-)
-
-triggers = await DatabaseController.get_all_triggers(
-    TriggersQuery(start=start, stop=stop)
-)
-```
-
-The project CLI is a standalone Python workflow, so the wrapper executes the asynchronous SDK calls through an event loop. Database query timestamps are normalised to timezone-aware UTC.
-
-For long intervals, FinalSpark recommends querying in chunks of about 10 minutes. Initial live validation should use a short interval.
+The `neuroplatform` import is lazy so the local project and tests can run without access to the hosted FinalSpark module. Live FinalSpark fetching is expected to run inside the authorised notebook environment unless FinalSpark later provides an equivalent external package/network route.
 
 ## Supported spike columns
 
@@ -87,7 +73,7 @@ The integration maps common database/export names to the PSE contract:
 | `channel` | `channel`, `Channel`, `electrode`, `Electrode`, `electrode_id` |
 | `Amplitude` | `Amplitude`, `amplitude`, `Max Amplitude`, `max_amplitude`, `amplitude_uv` |
 
-FinalSpark's documentation states that spike-event responses normally contain `Time`, `channel`, and, when available, `Max Amplitude`.
+The first live query must verify the exact DataFrame columns returned by the shared environment before relying on any one source-name variant.
 
 ## Trigger handling
 
@@ -101,7 +87,7 @@ If PSE metadata has no `stim_pulse_timestamps`, the adapter attempts to derive t
 
 ## Usage
 
-A FinalSpark dataset identifier (`fsname`) is required for spike queries:
+Run the live fetch from a checkout of this repository inside the FinalSpark notebook environment:
 
 ```bash
 python -m src.cli finalspark-fetch-pse \
@@ -133,7 +119,7 @@ The integration adds:
 - `finalspark_fs_name`
 - `finalspark_query_start`
 - `finalspark_query_stop`
-- `source = "FinalSpark NeuroPlatform v2"`
+- `source = "FinalSpark NeuroPlatform shared notebook API"`
 
 The scientific metadata still needs to provide the PSE phase contract and experimental variables:
 
@@ -146,4 +132,4 @@ Frequency and stimulation location are intentionally not guessed from trigger lo
 
 ## Safety boundary
 
-This implementation only reads recorded data. The official FinalSpark documentation explicitly recommends starting with read-only database calls and adding hardware control only after validation with the laboratory operator. Live stimulation must therefore remain a separate later phase with explicit safety bounds, logging, cleanup and operator approval.
+This module performs database reads only. Although the shared `neuroplatform` module also exposes `Experiment`, `IntanSoftware`, `Trigger`, stimulation parameter types and hardware-facing objects, those are intentionally outside this integration phase. Hardware-changing calls should only be introduced as a separate, explicitly validated experimental-control phase.

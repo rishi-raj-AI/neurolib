@@ -31,7 +31,8 @@ def main():
         choices=["adapt-pse", "finalspark-fetch-pse"],
         help=(
             "Optional command. Use 'adapt-pse' to prepare PSE inputs from a local export "
-            "or 'finalspark-fetch-pse' to fetch read-only NeuroPlatform v2 data and prepare PSE inputs."
+            "or 'finalspark-fetch-pse' inside the shared FinalSpark notebook environment "
+            "to fetch read-only NeuroPlatform data and prepare PSE inputs."
         )
     )
     parser.add_argument("--iteration", help="Iteration folder name, e.g. 'Iteration5'")
@@ -139,7 +140,7 @@ def main():
         protocol = PSEProtocol(cfg, paths)
     elif args.protocol == "BASELINE":
         from .protocols.baseline import BaselineProtocol
-        protocol = BaselineProtocol(cfg, paths)
+        protocol = BASELINEProtocol(cfg, paths)
 
     protocol.run(sample_mode=cfg["sample_mode"])
 

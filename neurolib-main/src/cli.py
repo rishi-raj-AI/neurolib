@@ -140,7 +140,7 @@ def main():
         protocol = PSEProtocol(cfg, paths)
     elif args.protocol == "BASELINE":
         from .protocols.baseline import BaselineProtocol
-        protocol = BASELINEProtocol(cfg, paths)
+        protocol = BaselineProtocol(cfg, paths)
 
     protocol.run(sample_mode=cfg["sample_mode"])
 

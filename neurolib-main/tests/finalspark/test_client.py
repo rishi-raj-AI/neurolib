@@ -10,18 +10,13 @@ from src.finalspark.client import (
 )
 
 
-class Query:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
+class FakeDatabase:
+    def __init__(self):
+        self.spike_calls = []
+        self.trigger_calls = []
 
-
-class FakeDatabaseController:
-    spike_calls = []
-    trigger_calls = []
-
-    @classmethod
-    async def get_spike_event(cls, query):
-        cls.spike_calls.append(query)
+    def get_spike_event(self, start, stop, fsname):
+        self.spike_calls.append((start, stop, fsname))
         return pd.DataFrame(
             {
                 "timestamp": [
@@ -33,9 +28,8 @@ class FakeDatabaseController:
             }
         )
 
-    @classmethod
-    async def get_all_triggers(cls, query):
-        cls.trigger_calls.append(query)
+    def get_all_triggers(self, start, stop):
+        self.trigger_calls.append((start, stop))
         return pd.DataFrame(
             {
                 "Time": [
@@ -50,13 +44,8 @@ class FakeDatabaseController:
 
 
 def _client():
-    FakeDatabaseController.spike_calls = []
-    FakeDatabaseController.trigger_calls = []
-    return FinalSparkClient(
-        database_controller=FakeDatabaseController,
-        spike_query_factory=Query,
-        triggers_query_factory=Query,
-    )
+    database = FakeDatabase()
+    return FinalSparkClient(database=database), database
 
 
 def _metadata():
@@ -74,8 +63,8 @@ def _metadata():
     }
 
 
-def test_client_builds_v2_spike_query():
-    client = _client()
+def test_client_calls_shared_spike_api_with_utc_datetimes():
+    client, database = _client()
     spikes = client.fetch_spike_events(
         "2024-05-02T09:00:00Z",
         "2024-05-02T09:05:00Z",
@@ -83,15 +72,15 @@ def test_client_builds_v2_spike_query():
     )
 
     assert len(spikes) == 2
-    assert len(FakeDatabaseController.spike_calls) == 1
-    query = FakeDatabaseController.spike_calls[0]
-    assert query.fsname == "fs410"
-    assert query.start.tzinfo is not None
-    assert query.stop.tzinfo is not None
+    assert len(database.spike_calls) == 1
+    start, stop, fsname = database.spike_calls[0]
+    assert fsname == "fs410"
+    assert start.tzinfo is not None
+    assert stop.tzinfo is not None
 
 
 def test_prepare_pse_from_finalspark_fetches_and_adapts(tmp_path):
-    client = _client()
+    client, database = _client()
 
     paths = prepare_pse_from_finalspark(
         metadata=_metadata(),
@@ -114,19 +103,19 @@ def test_prepare_pse_from_finalspark_fetches_and_adapts(tmp_path):
 
     params = json.loads(paths["experiment_params_path"].read_text())
     assert params["finalspark_fs_name"] == "fs410"
-    assert params["source"] == "FinalSpark NeuroPlatform v2"
+    assert params["source"] == "FinalSpark NeuroPlatform shared notebook API"
     assert params["stim_pulse_timestamps"] == [
         "2024-05-02T09:05:00.000000",
         "2024-05-02T09:05:01.000000",
     ]
 
-    assert len(FakeDatabaseController.spike_calls) == 1
-    assert FakeDatabaseController.spike_calls[0].fsname == "fs410"
-    assert len(FakeDatabaseController.trigger_calls) == 1
+    assert len(database.spike_calls) == 1
+    assert database.spike_calls[0][2] == "fs410"
+    assert len(database.trigger_calls) == 1
 
 
 def test_client_rejects_missing_fs_name():
-    client = _client()
+    client, _ = _client()
     with pytest.raises(FinalSparkIntegrationError, match="fs_name"):
         client.fetch_spike_events(
             "2024-05-02T09:00:00Z",
@@ -136,7 +125,7 @@ def test_client_rejects_missing_fs_name():
 
 
 def test_client_rejects_invalid_query_window():
-    client = _client()
+    client, _ = _client()
 
     with pytest.raises(FinalSparkIntegrationError, match="after start"):
         client.fetch_spike_events(

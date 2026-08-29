@@ -1,5 +1,3 @@
-import asyncio
-import inspect
 import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
@@ -14,62 +12,69 @@ class FinalSparkIntegrationError(RuntimeError):
 
 
 class FinalSparkClient:
-    """Read-only wrapper around FinalSpark's documented neuroplatformv2 SDK.
+    """Read-only wrapper for the shared FinalSpark NeuroPlatform notebook API.
 
-    The SDK is imported lazily so the local analysis/test suite can run without
-    NeuroPlatform access. Runtime use requires Python 3.11/3.12, the SDK to be
-    installed, and the required FinalSpark environment/network configuration.
+    The shared np7 notebook environment exposes a module named ``neuroplatform``
+    containing ``Database`` and ``Experiment`` classes. This client deliberately
+    uses only ``Database`` read methods and imports the platform module lazily so
+    the local analysis/test suite can run without FinalSpark access.
     """
 
-    def __init__(
-        self,
-        database_controller: Any = None,
-        spike_query_factory: Any = None,
-        triggers_query_factory: Any = None,
-    ) -> None:
-        self._database_controller = database_controller
-        self._spike_query_factory = spike_query_factory
-        self._triggers_query_factory = triggers_query_factory
+    def __init__(self, database: Any = None, database_factory: Any = None) -> None:
+        self._database = database
+        self._database_factory = database_factory
 
-    def _load_sdk(self) -> None:
-        if (
-            self._database_controller is not None
-            and self._spike_query_factory is not None
-            and self._triggers_query_factory is not None
-        ):
+    def _load_database(self) -> None:
+        if self._database is not None:
             return
 
+        if self._database_factory is None:
+            try:
+                from neuroplatform import Database
+            except ImportError as exc:
+                raise FinalSparkIntegrationError(
+                    "FinalSpark's shared 'neuroplatform' module is not available in this environment. "
+                    "Run this workflow inside the authorised FinalSpark notebook environment "
+                    "(for example np7.finalspark.com/notebooks), or inject a compatible Database instance."
+                ) from exc
+            self._database_factory = Database
+
         try:
-            from neuroplatformv2.core.database import DatabaseController
-            from neuroplatformv2.utils.schemas import SpikeEventQuery, TriggersQuery
-        except ImportError as exc:
+            self._database = self._database_factory()
+        except Exception as exc:
             raise FinalSparkIntegrationError(
-                "FinalSpark's 'neuroplatformv2' SDK is not available in this environment. "
-                "Install it from the authorised FinalSpark SDK clone with 'python -m pip install -e .' "
-                "and configure the required environment variables before importing it."
+                f"Could not initialise FinalSpark Database: {exc}"
             ) from exc
 
-        self._database_controller = self._database_controller or DatabaseController
-        self._spike_query_factory = self._spike_query_factory or SpikeEventQuery
-        self._triggers_query_factory = self._triggers_query_factory or TriggersQuery
-
     def fetch_spike_events(self, start, stop, fs_name: str) -> pd.DataFrame:
-        """Fetch spike events for a timezone-aware UTC interval from FinalSpark."""
+        """Fetch recorded spike events from the shared NeuroPlatform database."""
         if not fs_name:
             raise FinalSparkIntegrationError("FinalSpark fs_name is required for spike queries.")
 
         start_dt, stop_dt = _normalise_query_window(start, stop)
-        self._load_sdk()
-        query = self._spike_query_factory(start=start_dt, stop=stop_dt, fsname=fs_name)
-        data = _run_maybe_async(self._database_controller.get_spike_event(query))
+        self._load_database()
+
+        try:
+            data = self._database.get_spike_event(start_dt, stop_dt, fs_name)
+        except Exception as exc:
+            raise FinalSparkIntegrationError(
+                f"FinalSpark get_spike_event failed for fs_name={fs_name!r}: {exc}"
+            ) from exc
+
         return _ensure_dataframe(data, "spike events")
 
     def fetch_triggers(self, start, stop) -> pd.DataFrame:
-        """Fetch trigger events for a timezone-aware UTC interval from FinalSpark."""
+        """Fetch recorded trigger events from the shared NeuroPlatform database."""
         start_dt, stop_dt = _normalise_query_window(start, stop)
-        self._load_sdk()
-        query = self._triggers_query_factory(start=start_dt, stop=stop_dt)
-        data = _run_maybe_async(self._database_controller.get_all_triggers(query))
+        self._load_database()
+
+        try:
+            data = self._database.get_all_triggers(start_dt, stop_dt)
+        except Exception as exc:
+            raise FinalSparkIntegrationError(
+                f"FinalSpark get_all_triggers failed: {exc}"
+            ) from exc
+
         return _ensure_dataframe(data, "trigger events")
 
 
@@ -85,10 +90,10 @@ def prepare_pse_from_finalspark(
     client: Optional[FinalSparkClient] = None,
     include_trigger_timestamps: bool = True,
 ) -> dict:
-    """Fetch FinalSpark data and write a complete PSE-compatible experiment.
+    """Fetch shared FinalSpark data and write a complete PSE-compatible experiment.
 
     This function is read-only with respect to FinalSpark hardware. It queries
-    spike and trigger records, then hands them to the existing PSE adapter.
+    spike-event and trigger records, then hands them to the existing PSE adapter.
     """
     if not fs_name:
         raise FinalSparkIntegrationError("FinalSpark fs_name is required.")
@@ -101,7 +106,7 @@ def prepare_pse_from_finalspark(
     params.setdefault("finalspark_fs_name", fs_name)
     params.setdefault("finalspark_query_start", _iso_utc(start))
     params.setdefault("finalspark_query_stop", _iso_utc(stop))
-    params.setdefault("source", "FinalSpark NeuroPlatform v2")
+    params.setdefault("source", "FinalSpark NeuroPlatform shared notebook API")
 
     if include_trigger_timestamps and not params.get("stim_pulse_timestamps"):
         trigger_times = _extract_trigger_timestamps(triggers)
@@ -222,16 +227,3 @@ def _ensure_dataframe(data, label: str) -> pd.DataFrame:
         raise FinalSparkIntegrationError(
             f"FinalSpark returned an unsupported {label} object: {type(data).__name__}"
         ) from exc
-
-
-def _run_maybe_async(value):
-    if not inspect.isawaitable(value):
-        return value
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(value)
-    raise FinalSparkIntegrationError(
-        "A FinalSpark SDK coroutine was called from an already-running event loop. "
-        "Use the CLI/standalone workflow outside Jupyter, or await the SDK directly in a notebook."
-    )
